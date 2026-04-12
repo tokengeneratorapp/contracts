@@ -1,37 +1,33 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.20;
 
-import "@openzeppelin/contracts/token/ERC20/ERC20.sol";
-import "@openzeppelin/contracts/token/ERC20/extensions/ERC20Burnable.sol";
-import "@openzeppelin/contracts/token/ERC20/extensions/ERC20Pausable.sol";
-import "@openzeppelin/contracts/access/Ownable.sol";
+import {ERC20} from "@openzeppelin/contracts/token/ERC20/ERC20.sol";
+import {ERC20Pausable} from "@openzeppelin/contracts/token/ERC20/extensions/ERC20Pausable.sol";
+import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
 
-/**
- * @title StandardToken
- * @dev ERC-20 / BEP-20 token with optional burn, mint, pause, and blacklist features.
- * Built on OpenZeppelin v5. Deployed via https://tokengeneratorapp.com
- *
- * Features (toggleable at deployment):
- * - Burn: Token holders can burn their own tokens
- * - Mint: Owner can mint new tokens (renounceable)
- * - Pause: Owner can pause all transfers (renounceable)
- * - Blacklist: Owner can blacklist addresses (renounceable)
- * - No hidden functions, no proxy, no upgradeable logic
- * - Auto-verified on block explorers
- */
+/// @title StandardToken
+/// @notice Optional burn, mint, pause, and blacklist ERC-20 token.
 contract StandardToken is ERC20, ERC20Pausable, Ownable {
-    uint8 private immutable _decimals;
+    error InvalidOwner();
+    error InvalidSupply();
+    error InvalidDecimals();
+    error FeatureDisabled();
+    error CannotBlacklistOwner();
+    error BlacklistedAccount();
+    error FeeTransferFailed();
 
-    bool public burnEnabled;
-    bool public mintEnabled;
-    bool public pauseEnabled;
-    bool public blacklistEnabled;
+    uint8 private immutable _customDecimals;
+    uint8 private immutable _features;
 
-    mapping(address => bool) private _blacklisted;
+    mapping(address account => bool) private _blacklisted;
+
+    uint8 private constant FEATURE_BURN = 1 << 0;
+    uint8 private constant FEATURE_MINT = 1 << 1;
+    uint8 private constant FEATURE_PAUSE = 1 << 2;
+    uint8 private constant FEATURE_BLACKLIST = 1 << 3;
 
     event Blacklisted(address indexed account);
     event Unblacklisted(address indexed account);
-    event FeatureToggled(string feature, bool enabled);
 
     constructor(
         string memory name_,
@@ -45,87 +41,114 @@ contract StandardToken is ERC20, ERC20Pausable, Ownable {
         bool pauseEnabled_,
         bool blacklistEnabled_
     ) payable ERC20(name_, symbol_) Ownable(owner_) {
-        require(owner_ != address(0), "Owner cannot be zero address");
-        require(totalSupply_ > 0, "Supply must be > 0");
-        require(decimals_ <= 18, "Decimals must be <= 18");
+        if (owner_ == address(0)) revert InvalidOwner();
+        if (totalSupply_ == 0) revert InvalidSupply();
+        if (decimals_ > 18) revert InvalidDecimals();
 
-        _decimals = decimals_;
-        burnEnabled = burnEnabled_;
-        mintEnabled = mintEnabled_;
-        pauseEnabled = pauseEnabled_;
-        blacklistEnabled = blacklistEnabled_;
+        _customDecimals = decimals_;
+        _features = _packFeatures(burnEnabled_, mintEnabled_, pauseEnabled_, blacklistEnabled_);
 
         _mint(owner_, totalSupply_ * 10 ** decimals_);
-
-        if (msg.value > 0 && feeReceiver_ != address(0)) {
-            (bool success, ) = feeReceiver_.call{value: msg.value}("");
-            require(success, "Fee transfer failed");
-        }
+        _forwardFee(feeReceiver_);
     }
 
-    function decimals() public view virtual override returns (uint8) {
-        return _decimals;
+    function decimals() public view override returns (uint8) {
+        return _customDecimals;
     }
 
-    function generator() public pure returns (string memory) {
+    function generator() external pure returns (string memory) {
         return "https://tokengeneratorapp.com";
     }
 
-    // --- Burn ---
-    function burn(uint256 amount) public {
-        require(burnEnabled, "Burning is disabled");
+    function burnEnabled() public view returns (bool) {
+        return _hasFeature(FEATURE_BURN);
+    }
+
+    function mintEnabled() public view returns (bool) {
+        return _hasFeature(FEATURE_MINT);
+    }
+
+    function pauseEnabled() public view returns (bool) {
+        return _hasFeature(FEATURE_PAUSE);
+    }
+
+    function blacklistEnabled() public view returns (bool) {
+        return _hasFeature(FEATURE_BLACKLIST);
+    }
+
+    function burn(uint256 amount) external {
+        if (!burnEnabled()) revert FeatureDisabled();
         _burn(msg.sender, amount);
     }
 
-    function burnFrom(address account, uint256 amount) public {
-        require(burnEnabled, "Burning is disabled");
+    function burnFrom(address account, uint256 amount) external {
+        if (!burnEnabled()) revert FeatureDisabled();
         _spendAllowance(account, msg.sender, amount);
         _burn(account, amount);
     }
 
-    // --- Mint ---
-    function mint(address to, uint256 amount) public onlyOwner {
-        require(mintEnabled, "Minting is disabled");
+    function mint(address to, uint256 amount) external onlyOwner {
+        if (!mintEnabled()) revert FeatureDisabled();
         _mint(to, amount);
     }
 
-    // --- Pause ---
-    function pause() public onlyOwner {
-        require(pauseEnabled, "Pausing is disabled");
+    function pause() external onlyOwner {
+        if (!pauseEnabled()) revert FeatureDisabled();
         _pause();
     }
 
-    function unpause() public onlyOwner {
+    function unpause() external onlyOwner {
+        if (!pauseEnabled()) revert FeatureDisabled();
         _unpause();
     }
 
-    // --- Blacklist ---
-    function blacklist(address account) public onlyOwner {
-        require(blacklistEnabled, "Blacklisting is disabled");
-        require(account != owner(), "Cannot blacklist owner");
+    function blacklist(address account) external onlyOwner {
+        if (!blacklistEnabled()) revert FeatureDisabled();
+        if (account == owner()) revert CannotBlacklistOwner();
+
         _blacklisted[account] = true;
         emit Blacklisted(account);
     }
 
-    function unblacklist(address account) public onlyOwner {
+    function unblacklist(address account) external onlyOwner {
+        if (!blacklistEnabled()) revert FeatureDisabled();
+
         _blacklisted[account] = false;
         emit Unblacklisted(account);
     }
 
-    function isBlacklisted(address account) public view returns (bool) {
+    function isBlacklisted(address account) external view returns (bool) {
         return _blacklisted[account];
     }
 
-    // --- Overrides ---
-    function _update(address from, address to, uint256 value)
-        internal
-        virtual
-        override(ERC20, ERC20Pausable)
-    {
-        if (blacklistEnabled) {
-            require(!_blacklisted[from], "Sender is blacklisted");
-            require(!_blacklisted[to], "Recipient is blacklisted");
+    function _update(address from, address to, uint256 value) internal override(ERC20, ERC20Pausable) {
+        if (blacklistEnabled() && (_blacklisted[from] || _blacklisted[to])) {
+            revert BlacklistedAccount();
         }
+
         super._update(from, to, value);
+    }
+
+    function _hasFeature(uint8 feature) private view returns (bool) {
+        return _features & feature != 0;
+    }
+
+    function _packFeatures(
+        bool burnEnabled_,
+        bool mintEnabled_,
+        bool pauseEnabled_,
+        bool blacklistEnabled_
+    ) private pure returns (uint8 features) {
+        if (burnEnabled_) features |= FEATURE_BURN;
+        if (mintEnabled_) features |= FEATURE_MINT;
+        if (pauseEnabled_) features |= FEATURE_PAUSE;
+        if (blacklistEnabled_) features |= FEATURE_BLACKLIST;
+    }
+
+    function _forwardFee(address feeReceiver_) private {
+        if (msg.value == 0 || feeReceiver_ == address(0)) return;
+
+        (bool ok,) = payable(feeReceiver_).call{value: msg.value}("");
+        if (!ok) revert FeeTransferFailed();
     }
 }
