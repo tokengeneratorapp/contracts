@@ -1,22 +1,18 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.20;
 
-import "@openzeppelin/contracts/token/ERC20/ERC20.sol";
-import "@openzeppelin/contracts/access/Ownable.sol";
+import {ERC20} from "@openzeppelin/contracts/token/ERC20/ERC20.sol";
+import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
 
-/**
- * @title BasicToken
- * @dev Simple ERC-20 / BEP-20 token with configurable name, symbol, decimals, and supply.
- * Built on OpenZeppelin v5. Deployed via https://tokengeneratorapp.com
- *
- * Features:
- * - Fixed supply (minted once at deployment)
- * - Ownership (transferable, renounceable)
- * - No hidden mint, no backdoors, no proxy
- * - Auto-verified on block explorers
- */
+/// @title BasicToken
+/// @notice Fixed-supply ERC-20 token for the Basic package.
 contract BasicToken is ERC20, Ownable {
-    uint8 private immutable _decimals;
+    error InvalidOwner();
+    error InvalidSupply();
+    error InvalidDecimals();
+    error FeeTransferFailed();
+
+    uint8 private immutable _customDecimals;
 
     constructor(
         string memory name_,
@@ -26,25 +22,27 @@ contract BasicToken is ERC20, Ownable {
         address owner_,
         address feeReceiver_
     ) payable ERC20(name_, symbol_) Ownable(owner_) {
-        require(owner_ != address(0), "Owner cannot be zero address");
-        require(totalSupply_ > 0, "Supply must be > 0");
-        require(decimals_ <= 18, "Decimals must be <= 18");
+        if (owner_ == address(0)) revert InvalidOwner();
+        if (totalSupply_ == 0) revert InvalidSupply();
+        if (decimals_ > 18) revert InvalidDecimals();
 
-        _decimals = decimals_;
+        _customDecimals = decimals_;
         _mint(owner_, totalSupply_ * 10 ** decimals_);
-
-        // Transfer deployment fee to fee receiver
-        if (msg.value > 0 && feeReceiver_ != address(0)) {
-            (bool success, ) = feeReceiver_.call{value: msg.value}("");
-            require(success, "Fee transfer failed");
-        }
+        _forwardFee(feeReceiver_);
     }
 
-    function decimals() public view virtual override returns (uint8) {
-        return _decimals;
+    function decimals() public view override returns (uint8) {
+        return _customDecimals;
     }
 
-    function generator() public pure returns (string memory) {
+    function generator() external pure returns (string memory) {
         return "https://tokengeneratorapp.com";
+    }
+
+    function _forwardFee(address feeReceiver_) private {
+        if (msg.value == 0 || feeReceiver_ == address(0)) return;
+
+        (bool ok,) = payable(feeReceiver_).call{value: msg.value}("");
+        if (!ok) revert FeeTransferFailed();
     }
 }
